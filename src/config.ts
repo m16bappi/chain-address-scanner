@@ -27,3 +27,6 @@ export const minBalance = parseEther('0.5')
 export const rpcBatchSize = 100
 
 export const retryDelayMs = 1000
+
+// Blocks scanned at the same time. Higher is faster but hits public RPC rate limits sooner.
+export const blockConcurrency = 5

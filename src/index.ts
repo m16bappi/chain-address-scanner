@@ -2,7 +2,15 @@ import {setTimeout as sleep} from 'node:timers/promises'
 import {styleText} from 'node:util'
 import {BaseError, BlockNotFoundError, createPublicClient, getAddress, http, type Address} from 'viem'
 
-import {chains, dbPath, minBalance, retryDelayMs, rpcBatchSize, type ChainName} from './config.ts'
+import {
+  blockConcurrency,
+  chains,
+  dbPath,
+  minBalance,
+  retryDelayMs,
+  rpcBatchSize,
+  type ChainName,
+} from './config.ts'
 import {Store, type FoundAddress} from './db.ts'
 
 const chainName = process.argv[2]
@@ -17,6 +25,14 @@ const client = createPublicClient({
   transport: http(config.rpcUrl, {batch: {batchSize: rpcBatchSize}}),
 })
 
+interface ScannedBlock {
+  blockNumber: bigint
+  txCount: number
+  addressCount: number
+  candidateCount: number
+  found: FoundAddress[]
+}
+
 async function waitForBlock(blockNumber: bigint) {
   while (true) {
     try {
@@ -28,7 +44,7 @@ async function waitForBlock(blockNumber: bigint) {
   }
 }
 
-async function processBlock(blockNumber: bigint): Promise<void> {
+async function scanBlock(blockNumber: bigint): Promise<ScannedBlock> {
   const block = await waitForBlock(blockNumber)
 
   const seen = new Set<Address>()
@@ -41,15 +57,22 @@ async function processBlock(blockNumber: bigint): Promise<void> {
   // Current balance, not balance at this block: historical state needs an archive node.
   // The http transport packs these concurrent calls into JSON-RPC batch requests.
   const balances = await Promise.all(candidates.map((address) => client.getBalance({address})))
-  const rich: FoundAddress[] = candidates
+  const found = candidates
     .map((address, i) => ({address, balance: balances[i]}))
     .filter(({balance}) => balance >= minBalance)
 
-  const inserted = store.saveBlock(blockNumber, rich)
-  console.log(
-    `block ${blockNumber}: ${block.transactions.length} txs, ${seen.size} addresses, ` +
-      `${candidates.length} new, ${styleText('green', `${inserted} saved`)}`
-  )
+  return {
+    blockNumber,
+    txCount: block.transactions.length,
+    addressCount: seen.size,
+    candidateCount: candidates.length,
+    found,
+  }
+}
+
+function errorMessage(error: unknown): string {
+  // viem's full message embeds the whole batch request body.
+  return error instanceof BaseError ? error.shortMessage : (error as Error).message
 }
 
 let running = true
@@ -59,17 +82,31 @@ process.once('SIGINT', () => {
 })
 
 let blockNumber = (store.lastBlock() ?? config.startBlock - 1n) + 1n
-console.log(styleText('cyan', `${chainName}: starting at block ${blockNumber}`))
+console.log(
+  styleText('cyan', `${chainName}: starting at block ${blockNumber}, ${blockConcurrency} in parallel`)
+)
 
 while (running) {
-  try {
-    await processBlock(blockNumber)
-    blockNumber++
-  } catch (error) {
-    // viem's full message embeds the whole batch request body.
-    const message = error instanceof BaseError ? error.shortMessage : (error as Error).message
-    console.error(styleText('red', `block ${blockNumber} failed, retrying: ${message}`))
-    await sleep(retryDelayMs)
+  // Scan a window of blocks in parallel, but save strictly in order so progress
+  // never moves past a block that failed. After a failure the window restarts there.
+  const scans = Array.from({length: blockConcurrency}, (_, i) => scanBlock(blockNumber + BigInt(i)))
+  for (const scan of scans) scan.catch(() => {})
+
+  for (const scan of scans) {
+    if (!running) break
+    try {
+      const block = await scan
+      const inserted = store.saveBlock(block.blockNumber, block.found)
+      console.log(
+        `block ${block.blockNumber}: ${block.txCount} txs, ${block.addressCount} addresses, ` +
+          `${block.candidateCount} new, ${styleText('green', `${inserted} saved`)}`
+      )
+      blockNumber++
+    } catch (error) {
+      console.error(styleText('red', `block ${blockNumber} failed, retrying: ${errorMessage(error)}`))
+      await sleep(retryDelayMs)
+      break
+    }
   }
 }
 
