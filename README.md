@@ -1,4 +1,4 @@
-# Web3 Wallet Address Fetch
+# Chain Address Scanner
 
 Scan Ethereum or BNB Smart Chain blocks and collect every **unique wallet address** that holds at least **0.5 ETH / BNB**, stored in a local SQLite database.
 
