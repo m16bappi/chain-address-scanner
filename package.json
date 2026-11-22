@@ -1,16 +1,21 @@
 {
   "name": "address-fetch",
-  "version": "1.0.0",
-  "main": "index.js",
+  "version": "2.0.0",
+  "private": true,
   "type": "module",
   "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
-    "start:ether": "node ether_address_fetch.js",
-    "start:binance": "node binance_address_fetch.js"
+    "start": "node --disable-warning=ExperimentalWarning src/index.ts",
+    "typecheck": "tsc"
   },
   "dependencies": {
-    "chalk": "^5.1.2",
-    "postgres": "^3.3.1",
-    "web3": "^1.8.0"
+    "viem": "^2.58.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
   }
 }

@@ -1,4 +1,3 @@
 node_modules
 
-ether_block.txt
-binance_block.txt
+addresses.db*
