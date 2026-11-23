@@ -3,10 +3,11 @@
 Scan Ethereum or BNB Smart Chain blocks and collect every **unique wallet address** that holds at least **0.5 ETH / BNB**, stored in a local SQLite database.
 
 - Reads every transaction in each block and collects the `from` and `to` addresses
-- Scans several blocks in parallel and checks balances in JSON-RPC batches
+- Checks all of a block's balances in a single request (Multicall3 `getEthBalance`), and scans several blocks in parallel
 - Skips addresses that are already stored
 - Saves each address once per chain, with its balance and the block it was found in
-- Saves each block's addresses and progress together, so a restart continues at the next block without losing or duplicating work
+- A block that fails is recorded and retried in the next batch, so scanning never stalls or restarts from it
+- Saves each batch in one transaction, so a restart continues where it stopped without losing or duplicating work
 
 ## Requirements
 
@@ -33,7 +34,7 @@ block 15779426: 119 txs, 191 addresses, 176 new, 2 saved
 block 15779427: 104 txs, 162 addresses, 157 new, 7 saved
 ```
 
-Blocks are scanned in parallel but saved strictly in order, so progress never skips a block. Press **Ctrl+C** to stop. It finishes the block it is saving, then exits. Running the same command again resumes at the next block.
+Failed blocks show as `block N failed, will retry` and come back later as `block N (retried)`. Press **Ctrl+C** to stop. It finishes the current batch, then exits. Running the same command again resumes where it stopped, retrying failed blocks first.
 
 ## Configuration
 
@@ -44,7 +45,7 @@ Defaults live in [`src/config.ts`](src/config.ts):
 | `startBlock`       | `15779400`      | Used only on the first run of a chain |
 | `minBalance`       | `0.5` ETH / BNB | Minimum balance to store an address   |
 | `blockConcurrency` | `5`             | Blocks scanned in parallel            |
-| `rpcBatchSize`     | `100`           | BSC rejects batches larger than 100   |
+| `rpcBatchSize`     | `100`           | Max JSON-RPC calls per HTTP request   |
 | `dbPath`           | `addresses.db`  | SQLite file in the project root       |
 
 Override the RPC endpoint with environment variables:
@@ -54,7 +55,7 @@ ETHER_RPC_URL=https://your-eth-node npm start ether
 BINANCE_RPC_URL=https://your-bsc-node npm start binance
 ```
 
-Free public endpoints rate-limit heavily. Failed blocks are retried automatically, but a keyed RPC provider is much faster.
+Free public endpoints rate-limit. A keyed RPC provider lets you raise `blockConcurrency`.
 
 ## Notes
 
@@ -69,7 +70,7 @@ npm run typecheck
 
 ```
 src/
-├── index.ts    # CLI entry: parallel block scan, ordered saving, retries
-├── db.ts       # SQLite store: unique addresses + per-chain progress
+├── index.ts    # CLI entry: parallel block batches, one balance call per block
+├── db.ts       # SQLite store: unique addresses, progress, failed blocks
 └── config.ts   # chains, RPC URLs, thresholds
 ```

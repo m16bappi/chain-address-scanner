@@ -1,6 +1,14 @@
 import {setTimeout as sleep} from 'node:timers/promises'
 import {styleText} from 'node:util'
-import {BaseError, BlockNotFoundError, createPublicClient, getAddress, http, type Address} from 'viem'
+import {
+  BaseError,
+  BlockNotFoundError,
+  createPublicClient,
+  getAddress,
+  http,
+  parseAbi,
+  type Address,
+} from 'viem'
 
 import {
   blockConcurrency,
@@ -11,7 +19,7 @@ import {
   rpcBatchSize,
   type ChainName,
 } from './config.ts'
-import {Store, type FoundAddress} from './db.ts'
+import {Store, type BlockResult, type FoundAddress} from './db.ts'
 
 const chainName = process.argv[2]
 if (!(chainName && Object.hasOwn(chains, chainName))) {
@@ -24,6 +32,10 @@ const store = new Store(dbPath, chainName as ChainName)
 const client = createPublicClient({
   transport: http(config.rpcUrl, {batch: {batchSize: rpcBatchSize}}),
 })
+
+// Multicall3 has the same address on Ethereum and BNB Chain: https://www.multicall3.com
+const multicall3: Address = '0xcA11bde05977b3631167028862bE2a173976CA11'
+const getEthBalanceAbi = parseAbi(['function getEthBalance(address) view returns (uint256)'])
 
 interface ScannedBlock {
   blockNumber: bigint
@@ -54,9 +66,19 @@ async function scanBlock(blockNumber: bigint): Promise<ScannedBlock> {
   }
   const candidates = store.filterUnknown([...seen])
 
+  // One eth_call per block for all balances, instead of one request per address.
   // Current balance, not balance at this block: historical state needs an archive node.
-  // The http transport packs these concurrent calls into JSON-RPC batch requests.
-  const balances = await Promise.all(candidates.map((address) => client.getBalance({address})))
+  const balances = candidates.length === 0 ? [] : await client.multicall({
+    multicallAddress: multicall3,
+    allowFailure: false,
+    batchSize: 0,
+    contracts: candidates.map((address) => ({
+      address: multicall3,
+      abi: getEthBalanceAbi,
+      functionName: 'getEthBalance' as const,
+      args: [address],
+    })),
+  })
   const found = candidates
     .map((address, i) => ({address, balance: balances[i]}))
     .filter(({balance}) => balance >= minBalance)
@@ -78,7 +100,7 @@ function errorMessage(error: unknown): string {
 let running = true
 process.once('SIGINT', () => {
   running = false
-  console.log(styleText('yellow', '\nstopping after current block...'))
+  console.log(styleText('yellow', '\nstopping after current batch...'))
 })
 
 let blockNumber = (store.lastBlock() ?? config.startBlock - 1n) + 1n
@@ -86,28 +108,42 @@ console.log(
   styleText('cyan', `${chainName}: starting at block ${blockNumber}, ${blockConcurrency} in parallel`)
 )
 
+// Each batch retries earlier failed blocks first, then fills up with new blocks.
+// A block that fails is recorded in the db and retried next batch; scanning moves on.
 while (running) {
-  // Scan a window of blocks in parallel, but save strictly in order so progress
-  // never moves past a block that failed. After a failure the window restarts there.
-  const scans = Array.from({length: blockConcurrency}, (_, i) => scanBlock(blockNumber + BigInt(i)))
-  for (const scan of scans) scan.catch(() => {})
+  const retries = store.failedBlocks(blockConcurrency)
+  const fresh = Array.from(
+    {length: blockConcurrency - retries.length},
+    (_, i) => blockNumber + BigInt(i)
+  )
+  const batch = [...retries, ...fresh]
+  const scans = await Promise.allSettled(batch.map(scanBlock))
 
-  for (const scan of scans) {
-    if (!running) break
-    try {
-      const block = await scan
-      const inserted = store.saveBlock(block.blockNumber, block.found)
-      console.log(
-        `block ${block.blockNumber}: ${block.txCount} txs, ${block.addressCount} addresses, ` +
-          `${block.candidateCount} new, ${styleText('green', `${inserted} saved`)}`
+  const results: BlockResult[] = scans.map((scan, i) =>
+    scan.status === 'fulfilled'
+      ? {blockNumber: batch[i], ok: true, found: scan.value.found}
+      : {blockNumber: batch[i], ok: false}
+  )
+  const inserted = store.saveBatch(results)
+
+  scans.forEach((scan, i) => {
+    const retried = i < retries.length ? ' (retried)' : ''
+    if (scan.status === 'rejected') {
+      console.error(
+        styleText('red', `block ${batch[i]} failed${retried}, will retry: ${errorMessage(scan.reason)}`)
       )
-      blockNumber++
-    } catch (error) {
-      console.error(styleText('red', `block ${blockNumber} failed, retrying: ${errorMessage(error)}`))
-      await sleep(retryDelayMs)
-      break
+      return
     }
-  }
+    const block = scan.value
+    console.log(
+      `block ${batch[i]}${retried}: ${block.txCount} txs, ${block.addressCount} addresses, ` +
+        `${block.candidateCount} new, ${styleText('green', `${inserted[i]} saved`)}`
+    )
+  })
+
+  blockNumber += BigInt(fresh.length)
+
+  if (results.every((result) => !result.ok)) await sleep(retryDelayMs)
 }
 
 store.close()

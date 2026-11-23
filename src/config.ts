@@ -13,7 +13,7 @@ export const chains: Record<ChainName, ChainConfig> = {
     startBlock: 15_779_400n,
   },
   binance: {
-    rpcUrl: process.env.BINANCE_RPC_URL ?? 'https://bsc-dataseed.binance.org',
+    rpcUrl: process.env.BINANCE_RPC_URL ?? 'https://bsc-rpc.publicnode.com',
     startBlock: 15_779_400n,
   },
 }
@@ -23,7 +23,7 @@ export const dbPath = 'addresses.db'
 // Native coin (ETH / BNB) an address must hold to be stored.
 export const minBalance = parseEther('0.5')
 
-// Max JSON-RPC calls per HTTP batch request; BSC dataseed rejects batches over 100.
+// Max JSON-RPC calls per HTTP batch request; some BSC endpoints reject batches over 100.
 export const rpcBatchSize = 100
 
 export const retryDelayMs = 1000
